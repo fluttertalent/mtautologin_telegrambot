@@ -1,0 +1,1051 @@
+﻿using FlaUI.Core.AutomationElements;
+using FlaUI.Core.Definitions;
+using FlaUI.Core.WindowsAPI;
+using FlaUI.UIA3;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Threading;
+using Telegram.Bot;
+using Telegram.Bot.Args;
+using Telegram.Bot.Types.ReplyMarkups;
+
+public class CREDENTIAL
+{
+    public string ID { get; }
+    public string PD { get; }
+    public string SERVER { get; }
+
+    public CREDENTIAL(string id, string password, string serverInfo)
+    {
+        ID = id;
+        PD = password;
+        SERVER = serverInfo;
+    }
+}
+
+public class Logger
+{
+    private readonly string logFilePath;
+
+    public Logger(string filePath)
+    {
+        logFilePath = filePath;
+
+        // Create the log file if it doesn't exist
+        if (!File.Exists(logFilePath))
+        {
+            File.Create(logFilePath).Dispose(); // Ensure the file is created and closed
+        }
+    }
+    public void Log(string message)
+    {
+        // Format the log message with a timestamp
+        string logMessage = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} - {message}";
+
+        // Append the log message to the log file
+        using (StreamWriter writer = new StreamWriter(logFilePath, true))
+        {
+            writer.WriteLine(logMessage);
+        }
+    }
+    public void saveCredential(String id, String pwd, String server)
+    {
+        string message= id + "," + pwd + "," + server;
+        // Append the log message to the log file
+        using (StreamWriter writer = new StreamWriter(logFilePath, true))
+        {
+            writer.WriteLine(message);
+        }
+    }
+
+    public CREDENTIAL getCredential()
+    {
+        try
+        {
+            // Read all lines and get the last one
+            string lastLine = File.ReadLines(logFilePath).Last();
+
+            // Split the line into components (assuming they are separated by commas)
+            string[] credentials = lastLine.Split(',');
+
+            // Extract the id, password, and server info
+            string id = credentials[0].Trim();
+            string password = credentials[1].Trim();
+            string serverInfo = credentials[2];
+
+            CREDENTIAL cREDENTIAL = new CREDENTIAL(id, password, serverInfo);
+            
+            // Output the results
+            Console.WriteLine($"ID: {id}");
+            Console.WriteLine($"Password: {password}");
+            Console.WriteLine($"Server Info: {serverInfo}");
+
+            return cREDENTIAL;
+        }
+        catch (FileNotFoundException)
+        {
+            Console.WriteLine("The specified file was not found.");
+        }
+        catch (IOException ex)
+        {
+            Console.WriteLine($"An I/O error occurred: {ex.Message}");
+        }
+        catch (IndexOutOfRangeException)
+        {
+            Console.WriteLine("The last line does not contain enough data.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"An error occurred: {ex.Message}");
+        }
+
+        return new CREDENTIAL("","","");
+    }
+}
+
+class Program
+{
+    //static readonly string BotToken = "7244935671:AAHQaqfMssQ3XLRrBAh1WOfCcAw7NNxQAW0";
+    
+    static readonly string BotToken = "7679396013:AAFHAv0NRjQMk0QwWHog7Suw6LzUYdGwT_4";
+    static readonly string MT5Path = @"C:\\Program Files\\MetaTrader 5\\terminal64.exe";
+    static readonly string MT5Path_1 = @"C:\\Program Files\\MetaTrader 5(2)\\terminal64.exe";
+
+    static readonly TelegramBotClient bot = new TelegramBotClient(BotToken);
+    private static int currentSessionId;
+    private static WTS_CONNECTSTATE_CLASS? lastState = null;
+    public static Logger logger;
+    public static int tscon_status =0;
+    public static int selected_metatrader = -1;
+
+    private static CREDENTIAL first_credential;
+    private static Logger firstCredentialLogger;
+
+    private static CREDENTIAL second_credential;
+    private static Logger secondCredentialLogger;
+    const int MAX_CHANGES_PER_WEEK = 100; // Maximum changes allowed per week
+    static int currentChangeCount = 0;          // Current change count
+    static DateTime lastResetDate;              // Last reset date
+    private static Dictionary<long, bool> userVerificationStatus = new Dictionary<long, bool>();
+     
+
+    public enum WTS_INFO_CLASS
+    {
+        WTSInitialProgram,
+        WTSApplicationName,
+        WTSWorkingDirectory,
+        WTSOEMId,
+        WTSSessionId,
+        WTSUserName,
+        WTSWinStationName,
+        WTSDomainName,
+        WTSConnectState, // This is what you're interested in
+        WTSClientBuildNumber,
+        WTSClientName,
+        WTSClientDirectory,
+        WTSClientProductId,
+        WTSClientHardwareId,
+        WTSClientAddress,
+        WTSClientDisplay,
+        WTSClientProtocolType,
+        WTSIdleTime,
+        WTSLogonTime,
+        WTSIncomingBytes,
+        WTSOutgoingBytes,
+        WTSIncomingFrames,
+        WTSOutgoingFrames,
+        WTSClientInfo,
+        WTSSessionInfo
+    }
+
+    public enum WTS_CONNECTSTATE_CLASS
+    {
+        WTSActive,
+        WTSConnected,
+        WTSConnectQuery,
+        WTSShadow,
+        WTSDisconnected,
+        WTSIdle,
+        WTSListen,
+        WTSReset,
+        WTSDown,
+        WTSInit
+    }
+
+    [DllImport("user32.dll")]
+    static extern IntPtr GetForegroundWindow();
+
+    [DllImport("kernel32.dll")]
+    static extern IntPtr GetConsoleWindow();
+
+    // Import the IsIconic function from user32.dll
+    [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("Wtsapi32.dll")]
+    static extern bool WTSQuerySessionInformation(
+        IntPtr hServer, int sessionId, WTS_INFO_CLASS wtsInfoClass,
+        out IntPtr ppBuffer, out int pBytesReturned);
+
+    [DllImport("Wtsapi32.dll")]
+    static extern void WTSFreeMemory(IntPtr pMemory);
+
+    static void Main(string[] args)
+    {
+        // Initialize the logger with the desired log file name
+        lastResetDate = DateTime.Now; // Initialize with the current date
+        logger = new Logger("application.log");
+        firstCredentialLogger = new Logger("1.log");
+        secondCredentialLogger =  new Logger("2.log");
+
+        // Log application start
+        logger.Log("Application started.");
+        // Log count
+        LoadCount();
+        // Load the last reset date
+        LoadLastResetDate();
+
+        currentSessionId = Process.GetCurrentProcess().SessionId;
+
+        // Start session monitoring on another thread
+        Thread monitorThread = new Thread(SessionMonitorLoop)
+        {
+            IsBackground = true
+        };
+
+        monitorThread.Start();
+        bot.OnMessage += Bot_OnMessage;
+        bot.OnCallbackQuery += Bot_OnCallbackQuery;
+        bot.StartReceiving();
+        logger.Log("Bot started. Press Enter to exit.");
+        Console.WriteLine("Bot started. Press Enter to exit.");
+        Console.ReadLine();
+        bot.StopReceiving();
+    }
+    // Method to load the count from a file
+    static void LoadCount()
+    {
+        var FilePath = "currentChangeCount.txt";
+        if (File.Exists(FilePath))
+        {
+            string countString = File.ReadAllText(FilePath);
+            if (int.TryParse(countString, out int count))
+            {
+                currentChangeCount = count;
+            }
+        }
+        else
+        {
+            currentChangeCount = 0;
+            File.WriteAllText(FilePath, currentChangeCount.ToString());
+        }
+    }
+    // Method to save the current count to a file
+    static void SaveCount()
+    {
+        var FilePath = "currentChangeCount.txt";
+        File.WriteAllText(FilePath, currentChangeCount.ToString());
+    }
+    static void LoadLastResetDate()
+    {
+        var filePath = "lastResetDate.txt";
+        if (File.Exists(filePath))
+        {
+            string dateString = File.ReadAllText(filePath);
+            if (DateTime.TryParse(dateString, out DateTime date))
+            {
+                lastResetDate = date;
+            }
+        }
+        else
+        {
+            File.WriteAllText(filePath, DateTime.Now.ToString("o"));
+        }
+
+    }
+    // Method to save the last reset date to a file
+    static void SaveLastResetDate()
+    {
+        var filePath = "lastResetDate.txt";
+        if (File.Exists(filePath))
+            File.WriteAllText(filePath, lastResetDate.ToString("o")); // Save in ISO 8601 format
+        else
+        {
+            // If the file does not exist, create it and initialize the date to now
+            lastResetDate = DateTime.Now;
+            File.WriteAllText(filePath, lastResetDate.ToString("o")); // Save in ISO 8601 format
+        }
+    }
+
+    static void EnsureRdpSessionActive()
+    {
+        currentSessionId = Process.GetCurrentProcess().SessionId;
+        logger.Log("tscon applied!");
+        Console.WriteLine("tscon applied!");
+
+        try
+        {
+            // Set up the tscon command
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "tscon",
+                Arguments = $"{currentSessionId} /dest:console",
+                CreateNoWindow = true,
+                UseShellExecute = false
+            });
+            tscon_status = 1;
+        }
+        catch (Exception ex)
+        {
+            logger.Log("Exception: " + ex.Message);
+            Console.WriteLine("Exception: " + ex.Message);
+        }      
+    }
+
+    private static async void Bot_OnMessage(object sender, MessageEventArgs e)
+    {
+        
+        // Check if the user is already verified
+        if (userVerificationStatus.ContainsKey(e.Message.Chat.Id) && userVerificationStatus[e.Message.Chat.Id])
+        {
+            if (e.Message.Text == "/start")
+            {
+                var keyboard = new InlineKeyboardMarkup(new[]
+                {
+                    new[] { InlineKeyboardButton.WithCallbackData("MetaTrader1", "metatrader1") },
+                    new[] { InlineKeyboardButton.WithCallbackData("MetaTrader2", "metatrader2") }
+                });
+
+                await bot.SendTextMessageAsync(
+                    chatId: e.Message.Chat,
+                    text: "Please select a MetaTrader instance:",
+                    replyMarkup: keyboard
+                );
+            }
+
+            else if (e.Message?.Text?.StartsWith("/update") == true)
+            {
+                // Check if a week has passed since the last reset
+                if (DateTime.Now - lastResetDate >= TimeSpan.FromDays(7))
+                {
+                    currentChangeCount = 0; // Reset the change count
+                    lastResetDate = DateTime.Now; // Update the last reset date
+                    SaveLastResetDate(); // Save the new last reset date
+                }
+
+                if (currentChangeCount >= MAX_CHANGES_PER_WEEK)
+                {
+                    logger.Log("You have exceeded the limit of changes per week!");
+                    var keyboard = new InlineKeyboardMarkup(new[]
+                    {
+                        new[] { InlineKeyboardButton.WithCallbackData("🔙 Back", "goback") },
+                    });
+                    await bot.SendTextMessageAsync(
+                        chatId: e.Message.Chat.Id,
+                        replyMarkup: keyboard,
+                        text: "You have exceeded the limit of changes per week!"
+                    );
+                }
+                else
+                {
+                    string messageText = e.Message.Text;
+                    // Find the index of the first space
+                    int spaceIndex = messageText.IndexOf(' ');
+
+                    // Check if there is a space in the message
+                   
+                    if (selected_metatrader == -1)
+                    {
+                        logger.Log("Please select the metatrader");
+                        Console.WriteLine("Please select the metatrader");
+                        await bot.SendTextMessageAsync(e.Message.Chat.Id, "Please select the metatrader. Type the word 'Select' to select the metatrader!");
+                    }
+
+                    else if (spaceIndex == -1)
+                    {
+                        logger.Log("Usage: /update <login>,<password>,<server>");
+                        await bot.SendTextMessageAsync(e.Message.Chat.Id, "Usage: /update <login>,<password>,<server>");
+                        return;
+                    }
+                    else
+                    {
+                        // Split into two parts
+                        string part1 = messageText.Substring(0, spaceIndex); // Text before the first space
+                        string part2 = messageText.Substring(spaceIndex + 1); // Text after the first space
+
+                        var cre_parts = part2.Split(',');
+                        if (cre_parts.Length == 3) { 
+                        logger.Log("🔄 Logging in to MetaTrader...");
+                        await bot.SendTextMessageAsync(e.Message.Chat.Id, "\uD83D\uDD04 Logging in to MetaTrader...");
+
+                        bool success = AutomateMT5(cre_parts[0], cre_parts[1], cre_parts[2]);
+                        if (success)
+                        {
+                            if (selected_metatrader == 0)
+                            {
+                                firstCredentialLogger.saveCredential(cre_parts[0], cre_parts[1], cre_parts[2]);
+                            }
+                            else
+                            {
+                                secondCredentialLogger.saveCredential(cre_parts[0], cre_parts[1], cre_parts[2]);
+                            }
+                            currentChangeCount++;
+                            SaveCount();
+                            var keyboard = new InlineKeyboardMarkup(new[]
+                            {
+                                new[] { InlineKeyboardButton.WithCallbackData("MetaTrader1", "metatrader1") },
+                                new[] { InlineKeyboardButton.WithCallbackData("MetaTrader2", "metatrader2") }
+                            });
+
+                            await bot.SendTextMessageAsync(
+                                chatId: e.Message.Chat,
+                                text: "Logged In!",
+                                replyMarkup: keyboard
+                            );
+                        }
+
+                        if (!success)
+                        {
+                            logger.Log("🔄 Logging in to MetaTrader again...");
+                            await bot.SendTextMessageAsync(e.Message.Chat.Id, "\uD83D\uDD04 Logging in to MetaTrader again...");
+                            EnsureRdpSessionActive();  
+                            success = AutomateMT5(cre_parts[0], cre_parts[1], cre_parts[2]);
+                            if (success)
+                            {
+                                if (selected_metatrader == 0)
+                                {
+                                    firstCredentialLogger.saveCredential(cre_parts[0], cre_parts[1], cre_parts[2]);
+                                }
+                                else
+                                {
+                                    secondCredentialLogger.saveCredential(cre_parts[0], cre_parts[1], cre_parts[2]);
+                                }
+                                    var keyboard = new InlineKeyboardMarkup(new[]
+                                    {
+                                        new[] { InlineKeyboardButton.WithCallbackData("MetaTrader1", "metatrader1") },
+                                        new[] { InlineKeyboardButton.WithCallbackData("MetaTrader2", "metatrader2") }
+                                    });
+
+                                    await bot.SendTextMessageAsync(
+                                        chatId: e.Message.Chat,
+                                        text: "Logged In!",
+                                        replyMarkup: keyboard
+                                    );
+                                }
+                                else {
+                                    var keyboard = new InlineKeyboardMarkup(new[]
+                                    {
+                                        new[] { InlineKeyboardButton.WithCallbackData("MetaTrader1", "metatrader1") },
+                                        new[] { InlineKeyboardButton.WithCallbackData("MetaTrader2", "metatrader2") }
+                                    });
+                                    await bot.SendTextMessageAsync(chatId: e.Message.Chat.Id, text: "\u274C Login failed.", replyMarkup: keyboard);
+                                }
+                            }
+                        selected_metatrader = -1;
+                        }
+                        else
+                        {
+                            logger.Log("Usage: /update <login>,<password>,<server>");
+                            await bot.SendTextMessageAsync(e.Message.Chat.Id, "Usage: /update <login>,<password>,<server>");
+                            return;
+                        }
+                    }
+                }
+            }
+            else if (e.Message?.Text?.StartsWith("stop") == true)
+            {
+                logger.Log("Stop Message arrived!");
+                Console.WriteLine("Stop Message arrived!");
+                await bot.SendTextMessageAsync(e.Message.Chat.Id, "Bot Stopped...");
+                bot.StopReceiving();
+                Environment.Exit(0); // Exits the program with a success status
+            }
+            else
+            {
+                logger.Log("Unknown format message arrived!");
+                Console.WriteLine("Unknown format message arrived!");
+                var keyboard = new InlineKeyboardMarkup(new[]
+                {
+                    new[] { InlineKeyboardButton.WithCallbackData("MetaTrader1", "metatrader1") },
+                    new[] { InlineKeyboardButton.WithCallbackData("MetaTrader2", "metatrader2") }
+                });
+
+                await bot.SendTextMessageAsync(
+                   chatId: e.Message.Chat,
+                   text: "Unknown format message arrived! Please select the server to login.",
+                   replyMarkup: keyboard
+               );
+            }
+        }
+        // If the user is not verified, handle the password input directly
+        if (!userVerificationStatus.ContainsKey(e.Message.Chat.Id))
+        {
+            userVerificationStatus[e.Message.Chat.Id] = false; // Mark user as not verified yet
+            await bot.SendTextMessageAsync(e.Message.Chat.Id, "☺️ Welcome! Please enter your password to start using the bot:");
+        }
+        else if (!userVerificationStatus[e.Message.Chat.Id])
+        {
+            // Capture the password input
+            string password = e.Message.Text.Trim();
+
+            // Validate the password (replace "your_password" with the actual password logic)
+            if (ValidatePassword(password))
+            {
+                userVerificationStatus[e.Message.Chat.Id] = true; // Mark user as verified
+                var keyboard = new InlineKeyboardMarkup(new[]
+                {
+                    new[] { InlineKeyboardButton.WithCallbackData("MetaTrader1", "metatrader1") },
+                    new[] { InlineKeyboardButton.WithCallbackData("MetaTrader2", "metatrader2") }
+                });
+
+                await bot.SendTextMessageAsync(
+                    chatId: e.Message.Chat,
+                    text: "✅ Verification successful! You can now use the bot. \nPlease select a MetaTrader instance:",
+                    replyMarkup: keyboard
+                );
+            }
+            else
+            {
+                await bot.SendTextMessageAsync(e.Message.Chat.Id, "❌ Verification failed. Please try again with the correct password.");
+            }
+        }
+    }
+
+    private static async void Bot_OnCallbackQuery(object sender, CallbackQueryEventArgs e)
+    {
+        string responseMessage;
+
+        
+            try
+            {
+                // Using if-else instead of switch expression for compatibility with C# 7.3
+                if (e.CallbackQuery.Data == "metatrader1")
+                {
+                    responseMessage = "You selected MetaTrader1.";
+                    selected_metatrader = 0;
+                    var currentCredential = firstCredentialLogger.getCredential();
+                    responseMessage += $"\nCurrent Credential is ID:{currentCredential.ID} Password:{currentCredential.PD} Server:{currentCredential.SERVER}";
+                    responseMessage += $"\nDo you want to change them?";
+                    var keyboard = new InlineKeyboardMarkup(new[]
+                    {
+                        new[] { InlineKeyboardButton.WithCallbackData("✅ Yes", "update_yes") },
+                        new[] { InlineKeyboardButton.WithCallbackData("❌ No", "update_no") }
+                });
+                    await bot.SendTextMessageAsync(
+                        chatId: e.CallbackQuery.Message.Chat.Id,
+                        text: responseMessage,
+                        replyMarkup: keyboard
+                    );
+                }
+                else if (e.CallbackQuery.Data == "metatrader2")
+                {
+                    responseMessage = "You selected MetaTrader2.";
+                    selected_metatrader = 1;
+                    var currentCredential = secondCredentialLogger.getCredential();
+                    responseMessage += $"\nCurrent Credential is ID:{currentCredential.ID} Password:{currentCredential.PD} Server:{currentCredential.SERVER}";
+                    responseMessage += $"\nDo you want to change them? ";
+                    var keyboard = new InlineKeyboardMarkup(new[]
+                    {
+                        new[] { InlineKeyboardButton.WithCallbackData("✅ Yes", "update_yes") },
+                        new[] { InlineKeyboardButton.WithCallbackData("❌ No", "update_no") }
+                    });
+                    await bot.SendTextMessageAsync(
+                        chatId: e.CallbackQuery.Message.Chat.Id,
+                        text: responseMessage,
+                        replyMarkup: keyboard
+                    );
+                }
+                else if (e.CallbackQuery.Data == "update_yes")
+                {
+                    responseMessage = "Enter your credentials: /update Account,Password,Server";
+                    await bot.SendTextMessageAsync(
+                        chatId: e.CallbackQuery.Message.Chat.Id,
+                        text: responseMessage
+                    );
+                }
+                else if (e.CallbackQuery.Data == "update_no")
+                {
+                    responseMessage = "Go Back To the Starting Screen.";
+                    var keyboard = new InlineKeyboardMarkup(new[]
+                    {
+                    new[] { InlineKeyboardButton.WithCallbackData("🔙 Back", "goback") },
+            });
+                    await bot.SendTextMessageAsync(
+                        chatId: e.CallbackQuery.Message.Chat.Id,
+                        replyMarkup: keyboard,
+                        text: responseMessage
+                    );
+                }
+                else if (e.CallbackQuery.Data == "goback")
+                {
+                    var keyboard = new InlineKeyboardMarkup(new[]
+                    {
+                        new[] { InlineKeyboardButton.WithCallbackData("MetaTrader1", "metatrader1") },
+                        new[] { InlineKeyboardButton.WithCallbackData("MetaTrader2", "metatrader2") }
+                    });
+
+                    await bot.SendTextMessageAsync(
+                        chatId: e.CallbackQuery.Message.Chat.Id,
+                        text: "✅ When you want to update. select a MetaTrader instance:",
+                        replyMarkup: keyboard
+                    );
+                }
+                else
+                {
+                    responseMessage = "Unknown selection.";
+                    await bot.SendTextMessageAsync(
+                        chatId: e.CallbackQuery.Message.Chat.Id,
+                        text: responseMessage
+                    );
+                }
+            }
+            catch (Exception ex)
+            {
+                responseMessage = "Timeout Messaged!";
+                await bot.SendTextMessageAsync(
+                chatId: e.CallbackQuery.Message.Chat.Id,
+                text: responseMessage
+            );
+            }   
+        
+    }
+
+    static void KillMT5IfRunning()
+    {
+        try
+        {
+            var existing = Process.GetProcessesByName("terminal64"); // MT5 process name without .exe
+            foreach (var p in existing)
+            {
+                p.Kill();
+                p.WaitForExit();
+                logger.Log($"Killed MT5 process (PID {p.Id})");
+                Console.WriteLine($"Killed MT5 process (PID {p.Id})");
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.Log("Failed to kill MT5: " + ex.Message);
+            Console.WriteLine("Failed to kill MT5: " + ex.Message);
+        }
+    }
+
+    private static bool ValidatePassword(string password)
+    {
+        // Replace this with your actual password checking logic
+        const string correctPassword = "123456"; // Change this to your actual password
+        return password == correctPassword;
+    }
+
+    static bool AutomateMT5(string login, string password, string server)
+    {
+        try
+        {
+            KillMT5IfRunning(); // Kill before launching
+            
+            Thread.Sleep(1000);
+            var proc = selected_metatrader ==0? Process.Start(MT5Path): Process.Start(MT5Path_1);        
+            
+            Thread.Sleep(8000);
+
+            using (var app = FlaUI.Core.Application.Attach(proc))
+            using (var automation = new UIA3Automation())
+            {
+                logger.Log("Trying to find MT5 main window...");
+                Console.WriteLine("Trying to find MT5 main window...");
+
+                var window = app.GetMainWindow(automation);
+                if (window == null)
+                {
+                    logger.Log("MT5 main window not found");
+                    Console.WriteLine("MT5 main window not found");
+                    return false;
+                }
+
+                // Wait and close any dialog if present
+                // Check for and close any existing modal dialog before proceeding
+                var modalDialogs = window.ModalWindows;
+                if (modalDialogs.Length > 0)
+                {
+                    foreach (var initialDlg in modalDialogs)
+                    {
+                        logger.Log("⚠️ Found dialog: " + initialDlg.Title);
+                        Console.WriteLine("⚠️ Found dialog: " + initialDlg.Title);
+
+                        // Try to find a button like "OK", "Close", or "Cancel"
+                        var closeBtn = initialDlg.FindFirstDescendant(cf =>
+                            cf.ByControlType(FlaUI.Core.Definitions.ControlType.Button)
+                              .And(cf.ByName("OK").Or(cf.ByName("Close")).Or(cf.ByName("Cancel"))));
+
+                        if (closeBtn != null)
+                        {
+                            logger.Log("🟢 Closing dialog...");
+                            Console.WriteLine("🟢 Closing dialog...");
+                            closeBtn.AsButton().Invoke();
+                            Thread.Sleep(1000);
+                        }
+                        else
+                        {
+                            logger.Log("❌ No recognizable button to close the dialog.");
+                            Console.WriteLine("❌ No recognizable button to close the dialog.");
+                        }
+                    }
+                }
+                var menuBar = window.FindFirstDescendant(cf =>
+                    cf.ByControlType(FlaUI.Core.Definitions.ControlType.MenuBar).And(cf.ByName("Application")));
+
+                if (menuBar == null)
+                {
+                    logger.Log("❌ Menu bar not found");
+                    Console.WriteLine("\u274C Menu bar not found");
+                    return false;
+                }
+
+                var fileMenu = menuBar.FindFirstDescendant(cf =>
+                    cf.ByControlType(FlaUI.Core.Definitions.ControlType.MenuItem).And(cf.ByName("File")))?.AsMenuItem();
+
+                if (fileMenu == null)
+                {
+                    logger.Log("❌ 'File' menu item not found");
+                    Console.WriteLine("\u274C 'File' menu item not found");
+                    return false;
+                }
+
+                fileMenu.Click();
+                Thread.Sleep(1000);
+
+                fileMenu = menuBar.FindFirstDescendant(cf =>
+                    cf.ByControlType(FlaUI.Core.Definitions.ControlType.MenuItem).And(cf.ByName("File")))?.AsMenuItem();
+
+                var loginItem = window.FindFirstDescendant(cf =>
+                    cf.ByControlType(FlaUI.Core.Definitions.ControlType.MenuItem)
+                      .And(cf.ByName("Login to Trade Account")))?.AsMenuItem();
+
+                if (loginItem == null)
+                {
+                    loginItem = fileMenu.FindFirstDescendant(cf =>
+                    cf.ByControlType(FlaUI.Core.Definitions.ControlType.MenuItem)
+                      .And(cf.ByName("Login to Trade Account")))?.AsMenuItem();
+
+                    if (loginItem == null) {
+                        logger.Log("❌ Login menu item not found");
+                        Console.WriteLine("\u274C Login menu item not found");
+                        return false;
+                    }
+                }                              
+
+                loginItem.Click();
+                logger.Log("Login into trade account Button Clicked!");
+                Console.WriteLine("Login into trade account Button Clicked!");
+                Thread.Sleep(2000);
+
+                var dlg = window.ModalWindows.FirstOrDefault();
+                if (dlg == null)
+                {
+                    logger.Log("❌ Login dialog not found");
+                    Console.WriteLine("\u274C Login dialog not found");
+                    return false;
+                }
+
+                var loginCombo = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.ComboBox).And(cf.ByName("Login:")))?.AsComboBox();
+                if (loginCombo == null)
+                {
+                    logger.Log("❌ Login combo box not found");
+                    Console.WriteLine("❌ Login combo box not found");
+                    return false;
+                }
+
+                // Find the edit box inside the combo box
+                var loginEdit = loginCombo.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit).And(cf.ByName("Login:")))?.AsTextBox();
+                if (loginEdit == null)
+                {
+                    logger.Log("❌ Login edit field not found");
+                    Console.WriteLine("❌ Login edit field not found");
+                    return false;
+                }
+
+                loginEdit.Text = login;                              
+
+                // Find the edit box inside the combo box
+                var passEdit = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit).And(cf.ByName("Password:")))?.AsTextBox();
+                if (passEdit == null)
+                {
+                    logger.Log("❌ pass edit field not found");
+                    Console.WriteLine("❌ pass edit field not found");
+                    return false;
+                }
+
+                passEdit.Text = password;
+
+                var serverCombo = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.ComboBox).And(cf.ByName("Server:")))?.AsComboBox();
+                if (loginCombo == null)
+                {
+                    logger.Log("❌ Server combo box not found");
+                    Console.WriteLine("❌ Server combo box not found");
+                    return false;
+                }
+
+                // Find the edit box inside the combo box
+                var serverEdit = serverCombo.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit).And(cf.ByName("Server:")))?.AsTextBox();
+                if (serverEdit == null)
+                {
+                    logger.Log("❌ Server edit field not found");
+                    Console.WriteLine("❌ Server edit field not found");
+                    return false;
+                }
+
+                serverEdit.Text = server;
+
+                dlg.FindFirstDescendant(cf => cf.ByName("OK")).AsButton().Invoke();
+                Thread.Sleep(2000);
+                // Try finding the "0 / 0 Kb" text from main window directly
+                int i = 0;
+                while(i<10){
+
+                    var kbText = window.FindFirstDescendant(cf =>
+                        cf.ByControlType(ControlType.Text)
+                          .And(cf.ByName("0 / 0 Kb")));
+
+                    if (kbText != null)
+                    {
+                        Console.WriteLine($"Found element: {kbText.Name}");
+                        menuBar = window.FindFirstDescendant(cf =>
+                            cf.ByControlType(FlaUI.Core.Definitions.ControlType.MenuBar).And(cf.ByName("Application")));
+
+                        if (menuBar == null)
+                        {
+                            logger.Log("❌ Menu bar not found");
+                            Console.WriteLine("\u274C Menu bar not found");
+                            return false;
+                        }
+
+                        fileMenu = menuBar.FindFirstDescendant(cf =>
+                            cf.ByControlType(FlaUI.Core.Definitions.ControlType.MenuItem).And(cf.ByName("File")))?.AsMenuItem();
+
+                        if (fileMenu == null)
+                        {
+                            logger.Log("❌ 'File' menu item not found");
+                            Console.WriteLine("\u274C 'File' menu item not found");
+                            return false;
+                        }
+
+                        fileMenu.Click();
+                        Thread.Sleep(1000);
+
+                        fileMenu = menuBar.FindFirstDescendant(cf =>
+                            cf.ByControlType(FlaUI.Core.Definitions.ControlType.MenuItem).And(cf.ByName("File")))?.AsMenuItem();
+
+                        var openAccountItem = window.FindFirstDescendant(cf =>
+                            cf.ByControlType(FlaUI.Core.Definitions.ControlType.MenuItem)
+                              .And(cf.ByName("Open an Account")))?.AsMenuItem();
+
+                        if (openAccountItem == null)
+                        {
+                            openAccountItem = fileMenu.FindFirstDescendant(cf =>
+                            cf.ByControlType(FlaUI.Core.Definitions.ControlType.MenuItem)
+                              .And(cf.ByName("Open an Account")))?.AsMenuItem();
+
+                            if (openAccountItem == null)
+                            {
+                                logger.Log("❌ Open an Account item not found");
+                                Console.WriteLine("\u274C Open an Account item not found");
+                                return false;
+                            }
+                        }
+
+                        openAccountItem.Click();
+                        logger.Log("Open an Account Button Clicked!");
+                        Console.WriteLine("Open an Account Button Clicked!");
+                        Thread.Sleep(2000);
+
+                        dlg = window.ModalWindows.FirstOrDefault();
+                        if (dlg == null)
+                        {
+                            logger.Log("❌ Account dialog not found");
+                            Console.WriteLine("\u274C Account dialog not found");
+                            return false;
+                        }
+
+                        var dlg1 = window.ModalWindows.FirstOrDefault();
+                        if (dlg1 == null)
+                        {
+                            logger.Log("❌ Input dialog not found");
+                            Console.WriteLine("\u274C Input dialog not found");
+                            return false;
+                        }
+
+                        // Try to find the first Edit box (regardless of its name)
+                        var editBox = dlg1.FindFirstDescendant(cf => cf.ByControlType(FlaUI.Core.Definitions.ControlType.Edit))?.AsTextBox();
+
+                        if (editBox == null)
+                        {
+                            logger.Log("❌ Edit box not found in dialog");
+                            Console.WriteLine("\u274C Edit box not found in dialog");
+                            return false;
+                        }
+
+                        editBox.Text = server;
+                        Thread.Sleep(500);
+
+                        FlaUI.Core.Input.Keyboard.Type(VirtualKeyShort.RETURN);
+
+                        Thread.Sleep(1000);
+                        var nextBtn = dlg.FindFirstDescendant(cf => cf.ByControlType(FlaUI.Core.Definitions.ControlType.Button).And(cf.ByName("Next >")));
+
+                        if (nextBtn == null)
+                        {
+                            logger.Log("❌ Next Button not found in dialog");
+                            Console.WriteLine("\u274C Next Button not found in dialog");
+                            return false;
+                        }
+                        nextBtn.Click();
+                        Thread.Sleep(1000);
+
+                        // Check for and close any existing modal dialog before proceeding
+                        modalDialogs = window.ModalWindows;
+                        if (modalDialogs.Length > 0)
+                        {
+                            foreach (var initialDlg in modalDialogs)
+                            {
+                                logger.Log("⚠️ Found dialog: " + initialDlg.Title);
+                                Console.WriteLine("⚠️ Found dialog: " + initialDlg.Title);
+
+                                // Try to find a button like "OK", "Close", or "Cancel"
+                                var closeBtn = initialDlg.FindFirstDescendant(cf =>
+                                    cf.ByControlType(FlaUI.Core.Definitions.ControlType.Button)
+                                      .And(cf.ByName("OK").Or(cf.ByName("Close")).Or(cf.ByName("Cancel"))));
+
+                                if (closeBtn != null)
+                                {
+                                    logger.Log("🟢 Closing dialog...");
+                                    Console.WriteLine("🟢 Closing dialog...");
+                                    closeBtn.AsButton().Invoke();
+                                    Thread.Sleep(1000);
+                                }
+                                else
+                                {
+                                    logger.Log("❌ No recognizable button to close the dialog.");
+                                    Console.WriteLine("❌ No recognizable button to close the dialog.");
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine("Element not found.");
+                        return true;
+
+                    }
+                    Thread.Sleep(5000);
+                    i++;
+                }
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.Log("Error during MT5 automation: " + ex.Message);
+            Console.WriteLine("Error during MT5 automation: " + ex.Message);
+            return false;
+        }
+    }   
+
+    static void SessionMonitorLoop()
+    {
+        while (true)
+        {
+            currentSessionId = Process.GetCurrentProcess().SessionId;
+            var currentState = GetRdpSessionState(currentSessionId);
+            logger.Log($"Current State is {currentState}");
+            Console.WriteLine($"Current State is {currentState}");
+            // Only print if state changes
+            if (lastState != currentState)
+            {
+                lastState = currentState;
+                // when close the remote session window
+                if (currentState != WTS_CONNECTSTATE_CLASS.WTSActive && tscon_status == 0)
+                {
+                    logger.Log($"[{DateTime.Now:T}] session is inactive now (state: {currentState})");
+                    Console.WriteLine($"[{DateTime.Now:T}] session is inactive now (state: {currentState})");
+                    EnsureRdpSessionActive();
+                }
+                // when open the remote session window
+                else if(currentState != WTS_CONNECTSTATE_CLASS.WTSActive && tscon_status == 1)
+                {
+                    tscon_status = 2;
+                }
+                else
+                {
+                    logger.Log($"[{DateTime.Now:T}] session is active");
+                    Console.WriteLine($"[{DateTime.Now:T}] session is active");
+                }
+            }
+            // when minimize the remote session window
+            else if (IsRemoteDesktopMinimized() && currentState == WTS_CONNECTSTATE_CLASS.WTSActive && tscon_status==0)
+            {
+                logger.Log("tscon_status equals to 0");
+                EnsureRdpSessionActive();
+            }
+            else if(IsRemoteDesktopMinimized() && currentState == WTS_CONNECTSTATE_CLASS.WTSActive && tscon_status == 2)
+            {
+                logger.Log("tscon_status equals to 2");
+                tscon_status = 0;
+                while (IsRemoteDesktopMinimized())
+                {
+                    logger.Log("waiting for the remote session opens completely.");
+                    Thread.Sleep(1000);
+                    // waiting for the remote session opens completely.
+                }
+            }
+            Thread.Sleep(1000);
+        }
+    }
+    public static WTS_CONNECTSTATE_CLASS GetRdpSessionState(int sessionId)
+    {
+        IntPtr ppBuffer = IntPtr.Zero;
+        int pBytesReturned = 0;
+
+        if (WTSQuerySessionInformation(
+            IntPtr.Zero, // WTS_CURRENT_SERVER_HANDLE for local server
+            sessionId,
+            WTS_INFO_CLASS.WTSConnectState,
+            out ppBuffer,
+            out pBytesReturned
+        ))
+        {
+            try
+            {
+                if (pBytesReturned > 0)
+                {
+                    return (WTS_CONNECTSTATE_CLASS)Marshal.ReadInt32(ppBuffer);
+                }
+            }
+            finally
+            {
+                WTSFreeMemory(ppBuffer);
+            }
+        }
+        return WTS_CONNECTSTATE_CLASS.WTSDown; // Default or error state
+    }
+    public static bool IsRemoteDesktopMinimized()
+    {
+        IntPtr thisWindow = GetConsoleWindow();
+        IntPtr foreground = GetForegroundWindow();
+        
+        
+        if (foreground != thisWindow && foreground == IntPtr.Zero)
+        {
+            logger.Log($"foreground:{foreground}");
+            logger.Log($"thiswindow:{thisWindow}");
+            logger.Log($"[{DateTime.Now:T}] RDP session window is not active (possibly minimized or in background)");
+            Console.WriteLine($"[{DateTime.Now:T}] RDP session window is not active (possibly minimized or in background)");
+            return true;
+        }        
+        return false; // No console window associated with the current process, or an error occurred.
+    }
+
+}

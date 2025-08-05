@@ -1,0 +1,220 @@
+﻿using FlaUI.Core;
+using FlaUI.Core.AutomationElements;
+using FlaUI.Core.Definitions;
+using FlaUI.UIA3;
+using System;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading;
+using Telegram.Bot;
+using Telegram.Bot.Args;
+using Telegram.Bot.Types.Enums;
+using static System.Net.Mime.MediaTypeNames;
+
+class Program
+{
+    static readonly string BotToken = "7244935671:AAHQaqfMssQ3XLRrBAh1WOfCcAw7NNxQAW0";
+    static readonly string MT5Path = @"C:\\Program Files\\MetaTrader 5\\terminal64.exe";
+    static readonly TelegramBotClient bot = new TelegramBotClient(BotToken);
+
+    static void Main(string[] args)
+    {
+        bot.OnMessage += Bot_OnMessage;
+        bot.StartReceiving();
+        Console.WriteLine("Bot started. Press Enter to exit.");
+        Console.ReadLine();
+        bot.StopReceiving();
+    }
+
+    private static async void Bot_OnMessage(object sender, MessageEventArgs e)
+    {
+        if (e.Message?.Text?.StartsWith("/update") == true)
+        {
+            var parts = e.Message.Text.Split(' ');
+            if (parts.Length != 4)
+            {
+                await bot.SendTextMessageAsync(e.Message.Chat.Id, "Usage: /update <login> <password> <server>");
+                return;
+            }
+
+            await bot.SendTextMessageAsync(e.Message.Chat.Id, "\uD83D\uDD04 Logging in to MetaTrader...");
+
+            bool success = AutomateMT5(parts[1], parts[2], parts[3]);
+            await bot.SendTextMessageAsync(e.Message.Chat.Id, success ? "\u2705 Logged in!" : "\u274C Login failed.");
+        }
+    }
+
+    static void KillMT5IfRunning()
+    {
+        try
+        {
+            var existing = Process.GetProcessesByName("terminal64"); // MT5 process name without .exe
+            foreach (var p in existing)
+            {
+                p.Kill();
+                p.WaitForExit();
+                Console.WriteLine($"Killed MT5 process (PID {p.Id})");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("Failed to kill MT5: " + ex.Message);
+        }
+    }
+
+    
+
+    static bool AutomateMT5(string login, string password, string server)
+    {
+        try
+        {
+            KillMT5IfRunning(); // Kill before launching
+            var proc = Process.Start(MT5Path);
+            Thread.Sleep(8000);
+
+            using (var app = FlaUI.Core.Application.Attach(proc))
+            using (var automation = new UIA3Automation())
+            {
+                Console.WriteLine("Trying to find MT5 main window...");
+
+                var window = app.GetMainWindow(automation);
+                if (window == null)
+                {
+                    Console.WriteLine("MT5 main window not found");
+                    return false;
+                }
+
+                // Wait and close any dialog if present
+                // Check for and close any existing modal dialog before proceeding
+                var modalDialogs = window.ModalWindows;
+                if (modalDialogs.Length > 0)
+                {
+                    foreach (var initialDlg in modalDialogs)
+                    {
+                        Console.WriteLine("⚠️ Found dialog: " + initialDlg.Title);
+
+                        // Try to find a button like "OK", "Close", or "Cancel"
+                        var closeBtn = initialDlg.FindFirstDescendant(cf =>
+                            cf.ByControlType(FlaUI.Core.Definitions.ControlType.Button)
+                              .And(cf.ByName("OK").Or(cf.ByName("Close")).Or(cf.ByName("Cancel"))));
+
+                        if (closeBtn != null)
+                        {
+                            Console.WriteLine("🟢 Closing dialog...");
+                            closeBtn.AsButton().Invoke();
+                            Thread.Sleep(1000);
+                        }
+                        else
+                        {
+                            Console.WriteLine("❌ No recognizable button to close the dialog.");
+                        }
+                    }
+                }
+
+
+                var menuBar = window.FindFirstDescendant(cf =>
+                    cf.ByControlType(FlaUI.Core.Definitions.ControlType.MenuBar).And(cf.ByName("Application")));
+
+                if (menuBar == null)
+                {
+                    Console.WriteLine("\u274C Menu bar not found");
+                    return false;
+                }
+
+                var fileMenu = menuBar.FindFirstDescendant(cf =>
+                    cf.ByControlType(FlaUI.Core.Definitions.ControlType.MenuItem).And(cf.ByName("File")))?.AsMenuItem();
+
+                if (fileMenu == null)
+                {
+                    Console.WriteLine("\u274C 'File' menu item not found");
+                    return false;
+                }
+
+                fileMenu.Click();
+                Thread.Sleep(500);               
+               
+
+                var loginItem = window.FindFirstDescendant(cf =>
+                    cf.ByControlType(FlaUI.Core.Definitions.ControlType.MenuItem)
+                      .And(cf.ByName("Login to Trade Account")))?.AsMenuItem();
+
+                if (loginItem == null)
+                {
+                    Console.WriteLine("\u274C Login menu item not found");
+                    return false;
+                }
+
+                
+
+
+                loginItem.Click();
+                Console.WriteLine("Login into trade account Button Clicked!");
+                Thread.Sleep(2000);
+
+                var dlg = window.ModalWindows.FirstOrDefault();
+                if (dlg == null)
+                {
+                    Console.WriteLine("\u274C Login dialog not found");
+                    return false;
+                }
+
+                var loginCombo = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.ComboBox).And(cf.ByName("Login:")))?.AsComboBox();
+                if (loginCombo == null)
+                {
+                    Console.WriteLine("❌ Login combo box not found");
+                    return false;
+                }
+
+                // Find the edit box inside the combo box
+                var loginEdit = loginCombo.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit).And(cf.ByName("Login:")))?.AsTextBox();
+                if (loginEdit == null)
+                {
+                    Console.WriteLine("❌ Login edit field not found");
+                    return false;
+                }
+
+                loginEdit.Text = login;
+
+               
+
+                // Find the edit box inside the combo box
+                var passEdit = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit).And(cf.ByName("Password:")))?.AsTextBox();
+                if (passEdit == null)
+                {
+                    Console.WriteLine("❌ Login edit field not found");
+                    return false;
+                }
+
+                passEdit.Text = password;
+
+                var serverCombo = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.ComboBox).And(cf.ByName("Server:")))?.AsComboBox();
+                if (loginCombo == null)
+                {
+                    Console.WriteLine("❌ Server combo box not found");
+                    return false;
+                }
+
+                // Find the edit box inside the combo box
+                var serverEdit = serverCombo.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit).And(cf.ByName("Server:")))?.AsTextBox();
+                if (serverEdit == null)
+                {
+                    Console.WriteLine("❌ Server edit field not found");
+                    return false;
+                }
+
+                serverEdit.Text = server;
+
+                dlg.FindFirstDescendant(cf => cf.ByName("OK")).AsButton().Invoke();
+                Thread.Sleep(5000);
+
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("Error during MT5 automation: " + ex.Message);
+
+            return false;
+        }
+    }
+}

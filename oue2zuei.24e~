@@ -1,0 +1,495 @@
+﻿using FlaUI.Core;
+using FlaUI.Core.AutomationElements;
+using FlaUI.Core.Definitions;
+using FlaUI.Core.Logging;
+using FlaUI.UIA3;
+using System;
+using System.Diagnostics;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Runtime.Remoting.Lifetime;
+using System.Security.Principal;
+using System.Threading;
+using Telegram.Bot;
+using Telegram.Bot.Args;
+using Telegram.Bot.Types.Enums;
+using static System.Net.Mime.MediaTypeNames;
+
+public class Logger
+{
+    private readonly string logFilePath;
+
+    public Logger(string filePath)
+    {
+        logFilePath = filePath;
+
+        // Create the log file if it doesn't exist
+        if (!File.Exists(logFilePath))
+        {
+            File.Create(logFilePath).Dispose(); // Ensure the file is created and closed
+        }
+    }
+
+    public void Log(string message)
+    {
+        // Format the log message with a timestamp
+        string logMessage = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} - {message}";
+
+        // Append the log message to the log file
+        using (StreamWriter writer = new StreamWriter(logFilePath, true))
+        {
+            writer.WriteLine(logMessage);
+        }
+    }
+
+}
+
+class Program
+{
+    static readonly string BotToken = "7244935671:AAHQaqfMssQ3XLRrBAh1WOfCcAw7NNxQAW0";
+    static readonly string MT5Path = @"C:\\Program Files\\MetaTrader 5\\terminal64.exe";
+    static readonly TelegramBotClient bot = new TelegramBotClient(BotToken);
+    private static int currentSessionId;
+    private static WTS_CONNECTSTATE_CLASS? lastState = null;
+    public static Logger logger;
+    public enum WTS_INFO_CLASS
+    {
+        WTSInitialProgram,
+        WTSApplicationName,
+        WTSWorkingDirectory,
+        WTSOEMId,
+        WTSSessionId,
+        WTSUserName,
+        WTSWinStationName,
+        WTSDomainName,
+        WTSConnectState, // This is what you're interested in
+        WTSClientBuildNumber,
+        WTSClientName,
+        WTSClientDirectory,
+        WTSClientProductId,
+        WTSClientHardwareId,
+        WTSClientAddress,
+        WTSClientDisplay,
+        WTSClientProtocolType,
+        WTSIdleTime,
+        WTSLogonTime,
+        WTSIncomingBytes,
+        WTSOutgoingBytes,
+        WTSIncomingFrames,
+        WTSOutgoingFrames,
+        WTSClientInfo,
+        WTSSessionInfo
+    }
+
+    public enum WTS_CONNECTSTATE_CLASS
+    {
+        WTSActive,
+        WTSConnected,
+        WTSConnectQuery,
+        WTSShadow,
+        WTSDisconnected,
+        WTSIdle,
+        WTSListen,
+        WTSReset,
+        WTSDown,
+        WTSInit
+    }
+    // Import the GetConsoleWindow function from user32.dll
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetConsoleWindow();
+
+    // Import the IsIconic function from user32.dll
+    [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("Wtsapi32.dll")]
+    static extern bool WTSQuerySessionInformation(
+        IntPtr hServer, int sessionId, WTS_INFO_CLASS wtsInfoClass,
+        out IntPtr ppBuffer, out int pBytesReturned);
+
+    [DllImport("Wtsapi32.dll")]
+    static extern void WTSFreeMemory(IntPtr pMemory);
+
+    static void Main(string[] args)
+    {
+        // Initialize the logger with the desired log file name
+        
+
+        // Log application start
+        logger.Log("Application started.");
+
+        // Check if the app is running with administrative privileges
+        if (!IsAdministrator())
+        {
+            logger.Log("This application must be run as administrator.");
+            Console.WriteLine("This application must be run as administrator.");
+            return;
+        }
+
+
+        currentSessionId = Process.GetCurrentProcess().SessionId;
+
+        // Start session monitoring on another thread
+        Thread monitorThread = new Thread(SessionMonitorLoop)
+        {
+            IsBackground = true
+        };
+
+        monitorThread.Start();
+        bot.OnMessage += Bot_OnMessage;
+        bot.StartReceiving();
+        logger.Log("Bot started. Press Enter to exit.");
+        Console.WriteLine("Bot started. Press Enter to exit.");
+        Console.ReadLine();
+        bot.StopReceiving();
+    }
+
+    static void EnsureRdpSessionActive()
+    {
+        currentSessionId = Process.GetCurrentProcess().SessionId;
+        logger.Log("Bot started. Press Enter to exit.");
+        Console.WriteLine("Current Session ID: " + currentSessionId);
+
+        try
+        {
+            // Set up the tscon command
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "tscon",
+                Arguments = $"{currentSessionId} /dest:console",
+                CreateNoWindow = true,
+                UseShellExecute = false
+            });
+        }
+        catch (Exception ex)
+        {
+            logger.Log("Exception: " + ex.Message);
+            Console.WriteLine("Exception: " + ex.Message);
+        }
+        //var sessions = Process.GetProcessesByName("explorer")
+        //    .Select(p => p.SessionId)
+        //    .Distinct()
+        //    .ToList();
+
+        //Console.WriteLine(sessions);
+        //foreach (var sid in sessions)
+        //{
+        //    if (sid != currentSessionId)
+        //    {
+        //        Console.WriteLine($"Attempting to attach session {sid} using tscon...");
+
+        //        ProcessStartInfo psi = new ProcessStartInfo("tscon.exe", $"{sid} /dest:console")
+        //        {
+        //            CreateNoWindow = true,
+        //            UseShellExecute = false,
+        //            RedirectStandardError = true,
+        //            RedirectStandardOutput = true
+        //        };
+
+        //        try
+        //        {
+        //            using (var proc = Process.Start(psi))
+        //            {
+        //                string output = proc.StandardOutput.ReadToEnd();
+        //                string error = proc.StandardError.ReadToEnd();
+        //                proc.WaitForExit();
+
+        //                Console.WriteLine($"tscon output: {output}");
+        //                if (!string.IsNullOrWhiteSpace(error))
+        //                    Console.WriteLine($"tscon error: {error}");
+        //            }
+        //        }
+        //        catch (Exception ex)
+        //        {
+        //            Console.WriteLine("Failed to run tscon: " + ex.Message);
+        //        }
+
+        //        break;
+        //    }
+        //}
+    }
+    private static async void Bot_OnMessage(object sender, MessageEventArgs e)
+    {
+        if (e.Message?.Text?.StartsWith("/update") == true)
+        {
+            var parts = e.Message.Text.Split(' ');
+            if (parts.Length != 4)
+            {
+                logger.Log("Usage: /update <login> <password> <server>");
+                await bot.SendTextMessageAsync(e.Message.Chat.Id, "Usage: /update <login> <password> <server>");
+                return;
+            }
+
+            logger.Log("🔄 Logging in to MetaTrader...");
+            await bot.SendTextMessageAsync(e.Message.Chat.Id, "\uD83D\uDD04 Logging in to MetaTrader...");
+
+            bool success = AutomateMT5(parts[1], parts[2], parts[3]);
+            await bot.SendTextMessageAsync(e.Message.Chat.Id, success ? "\u2705 Logged in!" : "\u274C Login failed.");
+        }
+    }
+
+    static void KillMT5IfRunning()
+    {
+        try
+        {
+            var existing = Process.GetProcessesByName("terminal64"); // MT5 process name without .exe
+            foreach (var p in existing)
+            {
+                p.Kill();
+                p.WaitForExit();
+                logger.Log($"Killed MT5 process (PID {p.Id})");
+                Console.WriteLine($"Killed MT5 process (PID {p.Id})");
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.Log("Failed to kill MT5: " + ex.Message);
+            Console.WriteLine("Failed to kill MT5: " + ex.Message);
+        }
+    }
+
+    
+
+    static bool AutomateMT5(string login, string password, string server)
+    {
+        try
+        {
+            KillMT5IfRunning(); // Kill before launching
+            var proc = Process.Start(MT5Path);
+            Thread.Sleep(8000);
+
+            using (var app = FlaUI.Core.Application.Attach(proc))
+            using (var automation = new UIA3Automation())
+            {
+                logger.Log("Trying to find MT5 main window...");
+                Console.WriteLine("Trying to find MT5 main window...");
+
+                var window = app.GetMainWindow(automation);
+                if (window == null)
+                {
+                    logger.Log("MT5 main window not found");
+                    Console.WriteLine("MT5 main window not found");
+                    return false;
+                }
+
+                // Wait and close any dialog if present
+                // Check for and close any existing modal dialog before proceeding
+                var modalDialogs = window.ModalWindows;
+                if (modalDialogs.Length > 0)
+                {
+                    foreach (var initialDlg in modalDialogs)
+                    {
+                        logger.Log("⚠️ Found dialog: " + initialDlg.Title);
+                        Console.WriteLine("⚠️ Found dialog: " + initialDlg.Title);
+
+                        // Try to find a button like "OK", "Close", or "Cancel"
+                        var closeBtn = initialDlg.FindFirstDescendant(cf =>
+                            cf.ByControlType(FlaUI.Core.Definitions.ControlType.Button)
+                              .And(cf.ByName("OK").Or(cf.ByName("Close")).Or(cf.ByName("Cancel"))));
+
+                        if (closeBtn != null)
+                        {
+                            logger.Log("🟢 Closing dialog...");
+                            Console.WriteLine("🟢 Closing dialog...");
+                            closeBtn.AsButton().Invoke();
+                            Thread.Sleep(1000);
+                        }
+                        else
+                        {
+                            logger.Log("❌ No recognizable button to close the dialog.");
+                            Console.WriteLine("❌ No recognizable button to close the dialog.");
+                        }
+                    }
+                }
+
+
+                var menuBar = window.FindFirstDescendant(cf =>
+                    cf.ByControlType(FlaUI.Core.Definitions.ControlType.MenuBar).And(cf.ByName("Application")));
+
+                if (menuBar == null)
+                {
+                    logger.Log("❌ Menu bar not found");
+                    Console.WriteLine("\u274C Menu bar not found");
+                    return false;
+                }
+
+                var fileMenu = menuBar.FindFirstDescendant(cf =>
+                    cf.ByControlType(FlaUI.Core.Definitions.ControlType.MenuItem).And(cf.ByName("File")))?.AsMenuItem();
+
+                if (fileMenu == null)
+                {
+                    logger.Log("❌ 'File' menu item not found");
+                    Console.WriteLine("\u274C 'File' menu item not found");
+                    return false;
+                }
+
+                fileMenu.Click();
+                Thread.Sleep(500);               
+               
+
+                var loginItem = window.FindFirstDescendant(cf =>
+                    cf.ByControlType(FlaUI.Core.Definitions.ControlType.MenuItem)
+                      .And(cf.ByName("Login to Trade Account")))?.AsMenuItem();
+
+                if (loginItem == null)
+                {
+                    logger.Log("❌ Login menu item not found");
+                    Console.WriteLine("\u274C Login menu item not found");
+                    return false;
+                }                              
+
+                loginItem.Click();
+                logger.Log("Login into trade account Button Clicked!");
+                Console.WriteLine("Login into trade account Button Clicked!");
+                Thread.Sleep(2000);
+
+                var dlg = window.ModalWindows.FirstOrDefault();
+                if (dlg == null)
+                {
+                    logger.Log("❌ Login dialog not found");
+                    Console.WriteLine("\u274C Login dialog not found");
+                    return false;
+                }
+
+                var loginCombo = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.ComboBox).And(cf.ByName("Login:")))?.AsComboBox();
+                if (loginCombo == null)
+                {
+                    logger.Log("❌ Login combo box not found");
+                    Console.WriteLine("❌ Login combo box not found");
+                    return false;
+                }
+
+                // Find the edit box inside the combo box
+                var loginEdit = loginCombo.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit).And(cf.ByName("Login:")))?.AsTextBox();
+                if (loginEdit == null)
+                {
+                    logger.Log("❌ Login edit field not found");
+                    Console.WriteLine("❌ Login edit field not found");
+                    return false;
+                }
+
+                loginEdit.Text = login;
+                               
+
+                // Find the edit box inside the combo box
+                var passEdit = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit).And(cf.ByName("Password:")))?.AsTextBox();
+                if (passEdit == null)
+                {
+                    logger.Log("❌ pass edit field not found");
+                    Console.WriteLine("❌ pass edit field not found");
+                    return false;
+                }
+
+                passEdit.Text = password;
+
+                var serverCombo = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.ComboBox).And(cf.ByName("Server:")))?.AsComboBox();
+                if (loginCombo == null)
+                {
+                    logger.Log("❌ Server combo box not found");
+                    Console.WriteLine("❌ Server combo box not found");
+                    return false;
+                }
+
+                // Find the edit box inside the combo box
+                var serverEdit = serverCombo.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit).And(cf.ByName("Server:")))?.AsTextBox();
+                if (serverEdit == null)
+                {
+                    logger.Log("❌ Server edit field not found");
+                    Console.WriteLine("❌ Server edit field not found");
+                    return false;
+                }
+
+                serverEdit.Text = server;
+
+                dlg.FindFirstDescendant(cf => cf.ByName("OK")).AsButton().Invoke();
+                Thread.Sleep(5000);
+
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.Log("Error during MT5 automation: " + ex.Message);
+            Console.WriteLine("Error during MT5 automation: " + ex.Message);
+            return false;
+        }
+    }
+    static bool IsAdministrator()
+    {
+        using (WindowsIdentity identity = WindowsIdentity.GetCurrent())
+        {
+            WindowsPrincipal principal = new WindowsPrincipal(identity);
+            return principal.IsInRole(WindowsBuiltInRole.Administrator);
+        }
+    }
+
+    static void SessionMonitorLoop()
+    {
+        while (true)
+        {
+            currentSessionId = Process.GetCurrentProcess().SessionId;
+            var currentState = GetRdpSessionState(currentSessionId);
+            logger.Log($"Current State is {currentState}");
+            Console.WriteLine($"Current State is {currentState}");
+            // Only print if state changes
+            if (lastState != currentState)
+            {
+                lastState = currentState;
+                if (currentState != WTS_CONNECTSTATE_CLASS.WTSActive)
+                {
+                    Console.WriteLine($"[{DateTime.Now:T}] session is inactive now (state: {currentState})");
+                    EnsureRdpSessionActive();
+                }
+                else
+                {
+                    Console.WriteLine($"[{DateTime.Now:T}] session is active");
+                }
+            }
+            if (IsRemoteDesktopMinimized())
+            {
+                EnsureRdpSessionActive();
+                Console.WriteLine($"[{DateTime.Now:T}] session is minimized now (state: window is minimized!)");
+            }
+            Thread.Sleep(1000);
+        }
+    }
+    public static WTS_CONNECTSTATE_CLASS GetRdpSessionState(int sessionId)
+    {
+        IntPtr ppBuffer = IntPtr.Zero;
+        int pBytesReturned = 0;
+
+        if (WTSQuerySessionInformation(
+            IntPtr.Zero, // WTS_CURRENT_SERVER_HANDLE for local server
+            sessionId,
+            WTS_INFO_CLASS.WTSConnectState,
+            out ppBuffer,
+            out pBytesReturned
+        ))
+        {
+            try
+            {
+                if (pBytesReturned > 0)
+                {
+                    return (WTS_CONNECTSTATE_CLASS)Marshal.ReadInt32(ppBuffer);
+                }
+            }
+            finally
+            {
+                WTSFreeMemory(ppBuffer);
+            }
+        }
+        return WTS_CONNECTSTATE_CLASS.WTSDown; // Default or error state
+    }
+    public static bool IsRemoteDesktopMinimized()
+    {
+        IntPtr consoleWindowHandle = GetConsoleWindow();
+        if (consoleWindowHandle != IntPtr.Zero)
+        {
+            return IsIconic(consoleWindowHandle);
+        }
+        return false; // No console window associated with the current process, or an error occurred.
+    }
+
+}
